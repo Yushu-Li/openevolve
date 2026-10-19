@@ -492,6 +492,9 @@ Each call speaks newline-delimited JSON-RPC to a short-lived `codex app-server` 
 
 ## Examples Gallery
 
+To use unchanged local evaluators from Google's AlphaEvolve examples, see the
+[AlphaEvolve evaluator interoperability walkthrough](examples/alphaevolve_interop/).
+
 <div align="center">
 
 ### **Showcase Projects**

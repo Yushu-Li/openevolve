@@ -2,12 +2,14 @@
 
 import json
 import math
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from openevolve.config import Config
 from openevolve.evaluation_result import EvaluationResult
 
 
@@ -125,4 +127,105 @@ def adapt_evaluator(
             raise ValueError(f"{name} must be finite")
     return _AlphaEvolveEvaluator(
         evaluator, objective_metric, failure_sentinel, float(failure_score)
+    )
+
+
+def _config_mapping(value: Any, path: str) -> Mapping:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{path} must be a mapping")
+    return value
+
+
+def _warn_unmapped_fields(value: Mapping, supported: set, prefix: str = "") -> None:
+    paths = [f"{prefix}{key}" for key in value if key not in supported and value[key] is not None]
+    if paths:
+        warnings.warn(
+            "AlphaEvolve settings not imported: " + ", ".join(paths),
+            UserWarning,
+            stacklevel=3,
+        )
+
+
+def config_from_alphaevolve(
+    experiment: Mapping, *, api_base: str, api_key: Optional[str] = None
+) -> Config:
+    """Import an experiment dictionary for local, single-file Python evaluation.
+
+    Requires explicit models and a positive run_settings.max_programs; it never
+    guesses a model or falls back to OE's 10,000-iteration default. Model names
+    and relative weights are preserved. The endpoint and optional key must come
+    from the caller, not Google Cloud fields. No files, clients or requests are
+    created. Pass SDK models as model_dump() dictionaries.
+
+    max_programs becomes max_iterations (generation attempts, plus OE's seed
+    evaluation), not a strict evaluation, request, token, or cost limit. Optional
+    settings without mappings warn; max_duration is rejected rather than silently
+    losing a wall-clock limit. Other OE settings retain their defaults, except
+    cascade evaluation is disabled for the single-stage local evaluator adapter.
+    """
+    experiment = _config_mapping(experiment, "experiment")
+    run = _config_mapping(experiment.get("run_settings"), "run_settings")
+    generation = _config_mapping(experiment.get("generation_settings"), "generation_settings")
+    if not isinstance(api_base, str) or not api_base.strip():
+        raise ValueError("api_base must explicitly name the OpenEvolve model endpoint")
+    if experiment.get("program_language") != "python":
+        raise ValueError("Only program_language='python' is supported by this local import")
+    description = experiment.get("problem_description")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("problem_description must be a non-empty string")
+    iterations = run.get("max_programs")
+    if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
+        raise ValueError("run_settings.max_programs must be an explicit positive integer")
+    if run.get("max_duration") is not None:
+        raise ValueError("run_settings.max_duration cannot be enforced by this import")
+
+    mixture = generation.get("models")
+    if not isinstance(mixture, (list, tuple)) or not mixture:
+        raise ValueError("generation_settings.models must be a non-empty list")
+    models = []
+    for index, entry in enumerate(mixture):
+        path = f"generation_settings.models[{index}]"
+        entry = _config_mapping(entry, path)
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{path}.name must be a non-empty string")
+        weight = entry.get("weight")
+        if weight is None:
+            weight = 1.0
+        if (
+            isinstance(weight, bool)
+            or not isinstance(weight, Real)
+            or not math.isfinite(weight)
+            or weight <= 0
+        ):
+            raise ValueError(f"{path}.weight must be finite and positive")
+        models.append({"name": name, "weight": float(weight)})
+        _warn_unmapped_fields(entry, {"name", "weight"}, path + ".")
+    if not math.isfinite(sum(model["weight"] for model in models)):
+        raise ValueError("generation_settings.models weights must have a finite sum")
+
+    # Prefix the text so a description like 'system_message' remains literal,
+    # rather than accidentally selecting a PromptSampler template of that name.
+    system_message = "Problem description:\n" + description
+    context = generation.get("context")
+    if context is not None:
+        if not isinstance(context, str):
+            raise ValueError("generation_settings.context must be a string or None")
+        if context:
+            system_message += "\n\nAdditional context:\n" + context
+
+    _warn_unmapped_fields(
+        experiment,
+        {"title", "problem_description", "program_language", "run_settings", "generation_settings"},
+    )
+    _warn_unmapped_fields(run, {"max_programs", "max_duration"}, "run_settings.")
+    _warn_unmapped_fields(generation, {"models", "context"}, "generation_settings.")
+    return Config.from_dict(
+        {
+            "max_iterations": iterations,
+            "language": "python",
+            "llm": {"api_base": api_base, "api_key": api_key, "models": models},
+            "prompt": {"system_message": system_message},
+            "evaluator": {"cascade_evaluation": False},
+        }
     )

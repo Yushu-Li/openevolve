@@ -3,8 +3,9 @@
 This is the evaluator-contract slice of [#468](https://github.com/algorithmicsuperintelligence/openevolve/issues/468).
 It runs the **unchanged** `program.py` and `evaluate.py` from Google's
 [AlphaEvolve examples](https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud)
-through an explicit adapter. It does not replace the cloud SDK, translate cloud
-configuration, export bundles, or implement the rest of #468.
+through an explicit adapter. A separate opt-in helper imports a limited subset
+of an experiment configuration for local Python runs. Neither helper replaces
+the cloud SDK, exports bundles, or implements all of #468.
 
 ## Evaluate an upstream seed locally
 
@@ -82,6 +83,65 @@ The adapter provides **no sandbox**. Like the original local evaluators, it runs
 trusted Python code with the current process's privileges. Use a separate
 execution environment for untrusted candidates.
 
+## Import a local Python experiment configuration
+
+`config_from_alphaevolve` imports an explicit experiment dictionary without
+reading `.env`, contacting Google, or creating model clients:
+
+```python
+from openevolve.compat.alphaevolve import config_from_alphaevolve
+
+experiment = {
+    "title": "Circle Packing",
+    "program_language": "python",
+    "problem_description": "Pack circles into a unit square.",
+    "run_settings": {"max_programs": 10},
+    "generation_settings": {
+        "models": [{"name": "my-local-model", "weight": 1}],
+    },
+}
+config = config_from_alphaevolve(
+    experiment,
+    api_base="http://localhost:8000/v1",
+    api_key="local-placeholder",  # Replace if the chosen endpoint requires authentication.
+)
+# Pass config to run_evolution(program_path, adapted_evaluator, config=config).
+# Running evolution invokes your chosen endpoint; conversion alone does not.
+```
+
+The imported names must be served by the explicitly supplied OpenAI-compatible
+endpoint. Gemini model names are not remapped to local models. Endpoint/key
+values embedded in the cloud dictionary are never copied. A missing `api_key`
+retains OpenEvolve's usual provider behavior, which may use `OPENAI_API_KEY` when
+the client is subsequently constructed. Conversion adds no Google dependency.
+For a Google SDK config object, pass its `model_dump()` dictionary.
+
+| AlphaEvolve field | OpenEvolve mapping |
+| --- | --- |
+| `generation_settings.models[].name/weight` | `llm.models`, with relative weights unchanged; null/missing weights become 1 |
+| `run_settings.max_programs` | `max_iterations`, requiring an explicit positive integer |
+| `problem_description` + optional `generation_settings.context` | Literal `prompt.system_message` text |
+| `program_language="python"` | `language="python"`, `.py` suffix |
+
+The converter disables cascade evaluation for the single-stage local evaluator;
+other OE settings retain their defaults. It does not mutate the input or start
+a run. Missing models, missing budgets and unsupported languages raise instead
+of guessing defaults. `title` is metadata and is not imported.
+
+`max_iterations` counts generation attempts, **not** successful evaluations,
+requests, tokens or money. OE also evaluates the initial seed, and retries can
+make additional calls. `run_settings.max_duration` is rejected because this
+helper cannot enforce that wall-clock limit. Non-null unsupported settings emit
+warnings naming the fields, including cloud `concurrency`, prompt-inclusion
+flags and evolution settings. Their semantics are not silently presented as
+equivalent OE controls; OE's worker count stays at its default of one unless
+you configure it separately. Model-specific extra fields also warn and are not
+forwarded. Warning messages include field paths, not their values.
+
+This is a subset of inbound configuration support (A3 in #468), not `.env`
+translation, an experiment/controller shim, or a cloud-compatible export.
+Use the returned `Config` directly with the Python API.
+
 ## Validation
 
 Default unit tests use synthetic envelopes and OpenEvolve's real evaluator and
@@ -89,6 +149,7 @@ callable-serialization path, without Google's SDK, keys, or network access:
 
 ```bash
 python -m unittest discover -s tests -p test_alphaevolve_compat.py
+python -m unittest discover -s tests -p test_alphaevolve_config.py
 ```
 
 The walkthrough additionally permits direct validation against an upstream

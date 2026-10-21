@@ -1,12 +1,14 @@
-# AlphaEvolve evaluator interoperability
+# AlphaEvolve interoperability
 
-This is the evaluator-contract slice of [#468](https://github.com/algorithmicsuperintelligence/openevolve/issues/468).
+This walkthrough covers opt-in evaluator and configuration slices of
+[#468](https://github.com/algorithmicsuperintelligence/openevolve/issues/468).
 It runs the **unchanged** `program.py` and `evaluate.py` from Google's
 [AlphaEvolve examples](https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud)
 through an explicit adapter. A reverse adapter also lets a synchronous OpenEvolve
 evaluator score AlphaEvolve candidates. Separate opt-in helpers import a limited
-subset of experiment configuration for local Python runs. These helpers do not
-replace the cloud SDK, export bundles, or implement all of #468.
+subset of experiment configuration for local Python runs and export a limited
+configuration subset in the other direction. These helpers do not replace the
+cloud SDK, export bundles, or implement all of #468.
 
 ## Evaluate an upstream seed locally
 
@@ -139,6 +141,72 @@ Artifacts are omitted with a warning, apart from recognizing the `error` marker;
 text, images, and `alphaevolve_insights` artifacts are not round-tripped. This is
 only the reverse evaluator-contract slice of #468, not a cloud export bundle,
 SDK shim, or an assertion that a managed-service experiment has been run.
+
+## Export an OpenEvolve experiment configuration
+
+`config_to_alphaevolve` returns a plain experiment dictionary for the upstream
+SDK, without creating files, loading templates, importing Google dependencies,
+looking up credentials, or making requests:
+
+```python
+from openevolve.compat.alphaevolve_export import config_to_alphaevolve
+from openevolve.config import Config
+
+config = Config.from_dict({
+    "language": "python",
+    "max_iterations": 20,
+    "llm": {"models": [{"name": "my-local-model", "weight": 1.0}]},
+    "prompt": {"system_message": "Pack circles into a unit square."},
+})
+experiment = config_to_alphaevolve(
+    config,
+    title="Circle Packing",
+    # Pass literal problem text, not the name of a prompt template.
+    problem_description=config.prompt.system_message,
+    model_mapping={"my-local-model": "gemini-2.5-flash"},
+    generation_concurrency=2,
+)
+# UserWarning: OpenEvolve settings not exported (including defaults): ...
+# UserWarning: Model names explicitly remapped: llm.models[0].name
+```
+
+The result can be checked offline with the upstream SDK's
+`AlphaEvolveExperimentConfig.model_validate(experiment)`. Supplying it to a real
+SDK experiment's `create_experiment` is a separate, authenticated cloud operation
+that may incur charges; this helper does not perform that operation.
+
+| OpenEvolve / explicit input | Exported setting |
+| --- | --- |
+| `config.max_iterations` | `run_settings.max_programs` |
+| `config.language="python"` | `program_language="python"` |
+| Resolved `llm.models` names and relative weights | `generation_settings.models` |
+| Required literal `title` and `problem_description` arguments | Top-level text fields |
+| Optional `generation_concurrency` argument | `run_settings.concurrency` |
+
+Only single-file Python interoperability is covered. Non-Gemini models require
+an explicit name mapping; no fallback model is selected. Duplicate target names
+are merged by summing weights, with at most two distinct targets. Weights must be
+finite and positive. Names are checked for Gemini form, not against a live model
+catalog. Service availability, project permissions and model-tier mixture limits
+(such as caps on some Pro models) remain the caller/service's responsibility.
+
+The generation budget counts attempts, not successful evaluations, API requests,
+tokens, elapsed time, or money; seed evaluation is separate. Evaluation worker
+counts are **not** copied into generation concurrency. Configure the upstream
+experiment's local evaluation workers and `max_programs_evaluated` separately.
+Without `generation_concurrency`, the service's concurrency setting is omitted.
+
+Export always warns by field path about omitted settings, including defaults:
+MAP-Elites/islands/migration, local evaluator settings and timeouts, LLM feedback,
+prompt construction, per-island prompts, local endpoints/keys, sampling/retry
+controls, hooks, checkpointing, tracing and early stopping. Warning text contains
+field names, not values or arbitrary dictionary keys. Prompt templates are not
+resolved: explicitly supply the literal problem text you intend to use.
+
+The input config and mapping are not modified. Export followed by
+`config_from_alphaevolve` preserves the supported budget/language/model subset;
+the importer prefixes literal problem text and requires a new local endpoint.
+This does not preserve search behavior or provide a runnable cloud export bundle.
 
 ## Import a local Python experiment configuration
 
@@ -321,6 +389,7 @@ python -m unittest discover -s tests -p test_alphaevolve_config.py
 python -m unittest discover -s tests -p test_alphaevolve_env.py
 python -m unittest discover -s tests -p test_alphaevolve_runner.py
 python -m unittest discover -s tests -p test_alphaevolve_reverse.py
+python -m unittest discover -s tests -p test_alphaevolve_export.py
 ```
 
 The walkthrough additionally permits direct validation against an upstream

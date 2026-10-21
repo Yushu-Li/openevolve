@@ -196,8 +196,62 @@ is rejected rather than translated into an allegedly equivalent limit. Even
 equal budgets are not equivalent: OE counts generation attempts, additionally
 evaluates the seed, and may retry. This helper does not impose a strict
 evaluation, request, token, time or cost limit. The existing dictionary helper
-performs the final configuration validation; existing config loading and the
-example command-line runner are unchanged.
+performs the final configuration validation; existing config loading is
+unchanged. The example runner can use either helper as described below.
+
+## Run with imported configuration from the command line
+
+The runner accepts one of `--config` (OE YAML), `--alphaevolve-config`
+(experiment JSON) or `--alphaevolve-env` (an explicitly named `.env`). The two
+AlphaEvolve options **only validate the configuration and evaluate the seed by
+default**. Add `--evolve` to generate candidates using the selected endpoint.
+The legacy `--config` option still starts evolution, with its existing default
+of one iteration.
+
+For `.env`, install the optional parser above and prepare a copy such as
+`./local.env`. Set `MODEL` or the numbered model names to models actually served
+by your OE endpoint; importing a Gemini name does not make it available locally.
+Provide a problem-text file explicitly rather than running the upstream
+entrypoint to extract it:
+
+```bash
+# Import/validate and evaluate the original TSP seed; no model requests.
+python examples/alphaevolve_interop/run.py ../alphaevolve-reference/examples/tsp \
+  --alphaevolve-env ./local.env \
+  --instructions ../alphaevolve-reference/examples/tsp/instructions.md \
+  --api-base http://localhost:8000/v1
+
+# Explicit model-driven evolution; may incur charges at the selected endpoint.
+python examples/alphaevolve_interop/run.py ../alphaevolve-reference/examples/tsp \
+  --alphaevolve-env ./local.env \
+  --instructions ../alphaevolve-reference/examples/tsp/instructions.md \
+  --api-base http://localhost:8000/v1 \
+  --evolve --iterations 1 --output-dir ./interop-output
+```
+
+Alternatively, save an experiment dictionary (including `program_language`,
+`problem_description`, `run_settings` and `generation_settings`) as JSON:
+
+```bash
+python examples/alphaevolve_interop/run.py ../alphaevolve-reference/examples/circle_packing \
+  --alphaevolve-config ./experiment.json --api-base http://localhost:8000/v1 \
+  --evolve --iterations 1 --output-dir ./interop-output
+```
+
+Both imports require an explicit `--api-base`. To select a key without putting
+its value in command arguments, add `--api-key-env OE_API_KEY` after setting
+that environment variable yourself. An explicitly selected missing/empty key
+variable is an error. If this option is omitted, the existing OE provider's
+key behavior (including `OPENAI_API_KEY` fallback) applies when a client is
+constructed. Nothing is copied from Google credential fields in the source.
+
+With `--evolve`, omitting `--iterations` uses the imported generation budget.
+An explicit positive `--iterations` may only reduce that budget. As above,
+generation attempts are not a strict request/evaluation/cost cap. `--iterations`
+without an evolution mode is rejected rather than ignored. `--instructions`
+is required only for `.env`; JSON already contains the problem description.
+Invalid option combinations and import errors are reported before loading
+the example evaluator. The original cloud `run_evolution.py` is not imported.
 
 ## Validation
 
@@ -208,6 +262,7 @@ callable-serialization path, without Google's SDK, keys, or network access:
 python -m unittest discover -s tests -p test_alphaevolve_compat.py
 python -m unittest discover -s tests -p test_alphaevolve_config.py
 python -m unittest discover -s tests -p test_alphaevolve_env.py
+python -m unittest discover -s tests -p test_alphaevolve_runner.py
 ```
 
 The walkthrough additionally permits direct validation against an upstream

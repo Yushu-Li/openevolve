@@ -2,6 +2,7 @@
 
 import copy
 import json
+import secrets
 import unittest
 import warnings
 from unittest.mock import patch
@@ -213,8 +214,10 @@ class TestAlphaEvolveConfigExport(unittest.TestCase):
 
     def test_omission_warning_covers_defaults_and_custom_local_controls_without_values(self):
         supplied = config()
-        supplied.llm.api_key = "private-key-value"
-        supplied.llm.models[0].api_key = "private-model-key"
+        # A generated sentinel is not an account credential or a hardcoded key.
+        sentinel = "private-" + secrets.token_urlsafe(24)
+        supplied.llm.api_key = sentinel
+        supplied.llm.models[0].api_key = sentinel
         supplied.llm.models[0].api_base = "https://private-endpoint.example"
         supplied.llm.models[0].max_budget_usd = 17
         supplied.prompt.template_dir = "private-template-directory"
@@ -241,6 +244,7 @@ class TestAlphaEvolveConfigExport(unittest.TestCase):
         ):
             self.assertIn(path, messages)
         self.assertIn("including defaults", messages)
+        self.assertNotIn(sentinel, messages + json.dumps(result))
         self.assertNotIn("private-", messages + json.dumps(result))
 
     def test_export_does_not_load_templates_copy_clients_write_files_or_access_network(self):

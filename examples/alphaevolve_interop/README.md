@@ -1,11 +1,12 @@
-# AlphaEvolve local evaluator interoperability
+# AlphaEvolve evaluator interoperability
 
 This is the evaluator-contract slice of [#468](https://github.com/algorithmicsuperintelligence/openevolve/issues/468).
 It runs the **unchanged** `program.py` and `evaluate.py` from Google's
 [AlphaEvolve examples](https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud)
-through an explicit adapter. A separate opt-in helper imports a limited subset
-of an experiment configuration for local Python runs. Neither helper replaces
-the cloud SDK, exports bundles, or implements all of #468.
+through an explicit adapter. A reverse adapter also lets a synchronous OpenEvolve
+evaluator score AlphaEvolve candidates. Separate opt-in helpers import a limited
+subset of experiment configuration for local Python runs. These helpers do not
+replace the cloud SDK, export bundles, or implement all of #468.
 
 ## Evaluate an upstream seed locally
 
@@ -82,6 +83,62 @@ before interpreting the best program.
 The adapter provides **no sandbox**. Like the original local evaluators, it runs
 trusted Python code with the current process's privileges. Use a separate
 execution environment for untrusted candidates.
+
+## Use an OpenEvolve evaluator with AlphaEvolve candidates
+
+The reverse adapter accepts AlphaEvolve's `content.files` candidate format and
+calls an existing synchronous `evaluate(program_path)` function:
+
+```python
+from my_evaluator import evaluate as evaluate_openevolve
+from openevolve.compat.alphaevolve_reverse import adapt_openevolve_evaluator
+
+evaluate_candidate = adapt_openevolve_evaluator(
+    evaluate_openevolve,
+    objective_metric="combined_score",
+    failure_score=-1e12,
+)
+result = evaluate_candidate(
+    {"content": {"files": [{"path": "src/main.py", "content": "# candidate source\n"}]}}
+)
+# {"scores": {"scores": [{"metric": "combined_score", "score": ...}, ...]}}
+```
+
+Pass `evaluate_candidate` as `evaluator_function` to the upstream SDK's
+`AlphaEvolveExperiment`. The nested dictionary result is accepted by its evaluator
+wrapper and by `AlphaEvolveProgramEvaluation.model_validate(result)`. The adapter
+itself does not import the Google SDK, create a client, authenticate, or make
+requests. Managed-service setup and execution remain the caller's responsibility.
+
+Only one Python source file is supported, supplied as a dictionary or SDK-style
+object. Its source is written unchanged as UTF-8 to a private temporary
+`program.py`; candidate path metadata is ignored, and files are removed after
+evaluation, including on exceptions. Evaluators requiring sibling files, a
+particular original filename, asynchronous execution or files that outlive the
+call are not supported. The adapter does not change the working directory,
+provide a sandbox, or enforce a timeout; the trusted evaluator retains its
+existing execution privileges and resource controls.
+
+Both a metrics dictionary and `EvaluationResult` are supported. Numeric metrics
+keep their names and values. Boolean diagnostic flags and reserved `error` /
+`timeout` fields are not exported as optimization metrics. `objective_metric`
+must be present on success; it is not a request to rename metrics or configure
+the service's optimization objective.
+
+Evaluator exceptions, explicit `error` in metrics/artifacts, truthy `timeout`,
+and non-finite scores map **every available numeric metric and the objective**
+to the finite `failure_score`. Generic error feedback is included without
+copying exception text or artifact contents. Choose a failure value below all
+valid scores for the problem, especially for negative objectives. Malformed
+candidates, multi-file input, missing successful objectives and malformed return
+contracts raise errors. Interrupts propagate after cleanup.
+Zero or negative scores without an explicit failure marker remain valid scores;
+the adapter cannot infer failures that an evaluator silently converts to numbers.
+
+Artifacts are omitted with a warning, apart from recognizing the `error` marker;
+text, images, and `alphaevolve_insights` artifacts are not round-tripped. This is
+only the reverse evaluator-contract slice of #468, not a cloud export bundle,
+SDK shim, or an assertion that a managed-service experiment has been run.
 
 ## Import a local Python experiment configuration
 
@@ -263,6 +320,7 @@ python -m unittest discover -s tests -p test_alphaevolve_compat.py
 python -m unittest discover -s tests -p test_alphaevolve_config.py
 python -m unittest discover -s tests -p test_alphaevolve_env.py
 python -m unittest discover -s tests -p test_alphaevolve_runner.py
+python -m unittest discover -s tests -p test_alphaevolve_reverse.py
 ```
 
 The walkthrough additionally permits direct validation against an upstream

@@ -1,14 +1,15 @@
 # AlphaEvolve interoperability
 
-This walkthrough covers opt-in evaluator and configuration slices of
+This walkthrough covers opt-in evaluator, configuration and Python bundle slices of
 [#468](https://github.com/algorithmicsuperintelligence/openevolve/issues/468).
 It runs the **unchanged** `program.py` and `evaluate.py` from Google's
 [AlphaEvolve examples](https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud)
 through an explicit adapter. A reverse adapter also lets a synchronous OpenEvolve
 evaluator score AlphaEvolve candidates. Separate opt-in helpers import a limited
 subset of experiment configuration for local Python runs and export a limited
-configuration subset in the other direction. These helpers do not replace the
-cloud SDK, export bundles, or implement all of #468.
+configuration subset in the other direction. A minimal bundle exporter combines
+these reverse helpers with explicitly selected Python sources and a local seed
+check. These helpers do not replace the cloud SDK or implement all of #468.
 
 ## Evaluate an upstream seed locally
 
@@ -207,6 +208,87 @@ The input config and mapping are not modified. Export followed by
 `config_from_alphaevolve` preserves the supported budget/language/model subset;
 the importer prefixes literal problem text and requires a new local endpoint.
 This does not preserve search behavior or provide a runnable cloud export bundle.
+
+## Export a minimal Python bundle
+
+From an installed OpenEvolve checkout, export an existing single-file Python
+seed and synchronous `evaluate(program_path)` evaluator:
+
+```bash
+printf '%s\n' 'Improve the search for the global minimum of the supplied function.' > problem.md
+
+python -m openevolve.compat.alphaevolve_bundle \
+  examples/function_minimization/initial_program.py \
+  examples/function_minimization/evaluator.py \
+  --config examples/function_minimization/config.yaml \
+  --output-dir ./alphaevolve-bundle \
+  --title "Function minimization" \
+  --instructions problem.md \
+  --objective-metric combined_score \
+  --requirements-file examples/function_minimization/requirements.txt
+
+# Review/install the evaluator's dependencies in your environment first.
+python ./alphaevolve-bundle/check.py
+```
+
+The destination must not exist, and its parent must already exist. Exporting
+does not execute either source file, install packages, import Google's SDK,
+look up credentials, or contact a service. The CLI infers Python when the YAML
+omits its language. `--instructions` supplies literal problem text; it does not
+resolve prompt templates. Non-Gemini model names require explicit repeated
+`--model-map SOURCE=GEMINI` options. The configuration mapping and warnings are
+the same as `config_to_alphaevolve` above.
+
+The output contains:
+
+```text
+alphaevolve-bundle/
+  experiment.json            # Limited experiment configuration
+  evaluation.json            # Explicit objective metric and failure score
+  src/
+    __init__.py
+    program.py               # Original seed bytes
+    openevolve_evaluator.py   # Original evaluator bytes
+    evaluate.py              # Reverse adapter entry point
+  check.py
+  README.md
+  requirements.txt           # Only when explicitly supplied
+```
+
+Use `from src.evaluate import evaluate` with the bundle root on Python's module
+path and pass that callable as `evaluator_function` to the upstream SDK. Validate
+`experiment.json` with `AlphaEvolveExperimentConfig.model_validate` as described
+above. Read the generated README for installation and integration instructions.
+The same OpenEvolve checkout containing the reverse adapter must be installed in
+the target environment; no dependency or SDK is vendored into the bundle.
+
+Sources and the optional dependency file are copied byte for byte, without
+secret removal or automatic discovery of local modules, included requirements
+or data files. The exporter requires UTF-8 Python, a module-level synchronous
+`evaluate` accepting one path, and rejects relative imports and discoverable
+sibling module imports. Dynamic imports and working-directory dependencies
+cannot all be detected. Use self-contained sources and review them before
+sharing or running the bundle.
+
+`check.py` runs the copied seed through the exported evaluator, prints a JSON
+evaluation to stdout and redirects Python-level evaluator/import stdout to
+stderr. Evaluators must capture their own subprocess output to keep stdout
+clean. The check also works by absolute path from another directory.
+Import/contract errors and adapter-reported failures produce a nonzero exit
+status. The check executes
+trusted code with the current process's privileges; it adds no sandbox or
+timeout and cannot recognize failures silently converted into numeric scores.
+
+This is an offline-checkable export slice. It does not create a cloud client,
+start an experiment, enforce a cost limit or reproduce the OpenEvolve evaluation
+pipeline and search behavior. Managed-service authentication and execution
+remain separate operations that may incur charges.
+
+Run the offline bundle tests with:
+
+```bash
+python -m unittest discover -s tests -p 'test_alphaevolve_bundle.py' -v
+```
 
 ## Import a local Python experiment configuration
 

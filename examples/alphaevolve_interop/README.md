@@ -229,6 +229,9 @@ python -m openevolve.compat.alphaevolve_bundle \
 
 # Review/install the evaluator's dependencies in your environment first.
 python ./alphaevolve-bundle/check.py
+
+# Offline preflight; does not import the SDK/evaluator or execute either source.
+python ./alphaevolve-bundle/run_alphaevolve.py
 ```
 
 The destination must not exist, and its parent must already exist. Exporting
@@ -251,6 +254,7 @@ alphaevolve-bundle/
     openevolve_evaluator.py   # Original evaluator bytes
     evaluate.py              # Reverse adapter entry point
   check.py
+  run_alphaevolve.py          # Offline preflight by default; explicit --run for cloud use
   README.md
   requirements.txt           # Only when explicitly supplied
 ```
@@ -275,19 +279,64 @@ evaluation to stdout and redirects Python-level evaluator/import stdout to
 stderr. Evaluators must capture their own subprocess output to keep stdout
 clean. The check also works by absolute path from another directory.
 Import/contract errors and adapter-reported failures produce a nonzero exit
-status. The check executes
-trusted code with the current process's privileges; it adds no sandbox or
-timeout and cannot recognize failures silently converted into numeric scores.
+status. The check executes trusted code with the current process's privileges;
+it adds no sandbox or timeout and cannot recognize failures silently converted
+into numeric scores.
 
-This is an offline-checkable export slice. It does not create a cloud client,
-start an experiment, enforce a cost limit or reproduce the OpenEvolve evaluation
-pipeline and search behavior. Managed-service authentication and execution
-remain separate operations that may incur charges.
+### Preflight and opt-in cloud launch
+
+`run_alphaevolve.py` defaults to a basic offline JSON summary of the bundle,
+models and generation budget. It checks the exported configuration subset,
+evaluation options and Python sources without importing the SDK or evaluator,
+executing a seed, looking up credentials or making requests. `--dry-run` is an
+explicit alias for this default. Dependency installation, full SDK schemas,
+permissions and live model availability are not checked in this mode.
+
+For cloud use, install the official SDK from a reviewed checkout of
+[Google's repository](https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud)
+and follow its README for ADC, project, engine and service access setup. Review
+the generation budget and select currently available models explicitly during
+export; the Gemini-name check is not a live model catalog. Then opt in:
+
+```bash
+python ./alphaevolve-bundle/run_alphaevolve.py --run \
+  --project-id YOUR_PROJECT_ID --engine YOUR_ENGINE_ID \
+  --max-programs-evaluated 1
+```
+
+The project, engine and positive evaluation target are required for `--run`.
+`--location` accepts `global` (default), `us` or `eu`. No project/engine values
+are inferred from `.env` or environment variables; Google credentials follow the
+SDK's ADC behavior only after cloud use is requested. There is no endpoint override.
+
+The launcher validates the configuration with the real SDK and evaluates the
+seed locally before constructing a client. It creates a new experiment, uploads
+the seed with its actual scores, checks seed creation and start responses, then
+invokes the SDK controller with one sampler and one synchronous evaluator. This
+avoids requiring thread-safe or signal-free evaluators. The generated entry point
+resolves the bundle relative to itself and works from another directory. Existing
+bundles can also use `python -m openevolve.compat.alphaevolve_launch /path/to/bundle`.
+
+The final run JSON includes the experiment name, SDK statistics and whether the
+evaluation target was reached; failures or unmet targets exit nonzero. The target
+cannot exceed the exported generation-attempt budget, but it is not a strict
+evaluation cap: SDK polling/queued work can overshoot it, and seed evaluation is
+additional. The positive `--idle-timeout-seconds` (default 120) is an idle threshold,
+not a wall-clock timeout or a cost limit. Running trusted sources adds no sandbox.
+
+Cloud operations may incur charges. Every `--run` creates a new experiment;
+reruns do not resume existing work. Failure, interruption or local controller exit
+does not automatically stop or delete remote resources. Inspect the reported
+experiment in your project. Export and preflight never start cloud work, and
+offline validation is not evidence of a managed-service run. This remains a
+limited #468 export slice and does not reproduce OpenEvolve's evaluator pipeline,
+search behavior or the broader SDK shim.
 
 Run the offline bundle tests with:
 
 ```bash
 python -m unittest discover -s tests -p 'test_alphaevolve_bundle.py' -v
+python -m unittest discover -s tests -p 'test_alphaevolve_launch.py' -v
 ```
 
 ## Import a local Python experiment configuration

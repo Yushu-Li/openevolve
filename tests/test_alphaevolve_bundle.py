@@ -116,6 +116,7 @@ class TestAlphaEvolveBundle(unittest.TestCase):
                 "experiment.json",
                 "evaluation.json",
                 "check.py",
+                "run_alphaevolve.py",
                 "README.md",
             },
         )

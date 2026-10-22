@@ -63,6 +63,16 @@ if __name__ == "__main__":
     raise SystemExit(main())
 '''
 
+_LAUNCH = '''"""Offline preflight by default; --run explicitly opts in to cloud use."""
+
+from pathlib import Path
+
+from openevolve.compat.alphaevolve_launch import main
+
+if __name__ == "__main__":
+    raise SystemExit(main(bundle_dir=Path(__file__).resolve().parent))
+'''
+
 _README = """# Minimal AlphaEvolve evaluator bundle
 
 This directory packages a single Python seed and a synchronous
@@ -74,12 +84,13 @@ This directory packages a single Python seed and a synchronous
 - `evaluation.json`: the objective metric and finite failure score.
 - `experiment.json`: the limited AlphaEvolve experiment configuration.
 - `check.py`: an explicit local seed-evaluation check.
+- `run_alphaevolve.py`: offline preflight or an explicitly requested cloud launch.
 - `requirements.txt`, only if explicitly supplied during export.
 
 ## Install dependencies
 
 Use Python 3.10 or newer and an OpenEvolve checkout containing
-`openevolve.compat.alphaevolve_reverse`. Install that checkout in your chosen
+`openevolve.compat.alphaevolve_launch`. Install that checkout in your chosen
 environment, for example `python -m pip install /path/to/openevolve`.
 The exporter does not infer, install or vendor dependencies. Review and install
 your evaluator's packages; if `requirements.txt` is included, review it before
@@ -120,11 +131,52 @@ AlphaEvolveExperimentConfig.model_validate(config)  # Offline schema check.
 # Pass `evaluate` as evaluator_function to your configured AlphaEvolveExperiment.
 ```
 
-Cloud authentication, client construction, experiment creation and controller
-execution are separate, explicit operations and may incur charges. This bundle
-does not perform them or claim a managed-service run. Generation limits are not
-cost or evaluation limits. Configure evaluation workers separately from service
-generation concurrency and check model availability/mixture rules yourself.
+## Preflight or explicitly launch an experiment
+
+Run `python run_alphaevolve.py` (or add `--dry-run`) for an offline JSON summary.
+The script resolves the bundle relative to itself, including from another working
+directory. It checks the exported configuration subset, evaluation options and
+source files without importing the SDK or evaluator, executing the seed,
+discovering credentials or making requests. This basic check does not validate
+installed dependencies, SDK schemas, permissions or live model availability.
+Use `check.py` separately to execute and test your trusted evaluator locally.
+
+For cloud use, install the official SDK from a reviewed checkout of
+https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud, for example
+`python -m pip install /path/to/alphaevolve-on-googlecloud`. Follow that project's
+README for Google application-default credentials, the GCP project, Gemini
+Enterprise engine and access requirements. Choose models currently supported
+by your service; the exporter's Gemini-name syntax check is not a model catalog.
+
+After reviewing the exported generation budget, explicitly opt in:
+
+```bash
+python run_alphaevolve.py --run \\
+  --project-id YOUR_PROJECT_ID --engine YOUR_ENGINE_ID \\
+  --max-programs-evaluated 1
+```
+
+Only `--run` imports the optional SDK and trusted evaluator. It validates with
+the real SDK and evaluates the seed before constructing a client, then creates
+a new experiment, uploads the seed with its actual scores, starts generation
+and invokes the SDK controller with one sampler and one synchronous evaluator.
+`--location` accepts `global` (default), `us` or `eu`. Credentials use the SDK's
+normal Google ADC flow; no key, endpoint or .env discovery is added by the runner.
+
+The evaluation target is required for `--run` and cannot exceed the exported
+generation-attempt budget. It is a controller stopping target, not a strict
+evaluation cap: SDK polling/queued work can overshoot it, and seed evaluation
+is additional. Generation limits are not cost limits. The positive
+`--idle-timeout-seconds` (default 120) is an idle threshold, not a wall-clock
+timeout, sandbox, cloud cancellation or money limit.
+
+The final run JSON includes the experiment name, SDK statistics and whether the
+evaluation target was reached. An unmet target or launch failure exits nonzero.
+SDK diagnostics go to stderr. Cloud operations may incur charges. Each `--run`
+creates a new experiment; reruns do not resume an earlier experiment. Failures
+or interruptions do not delete or stop cloud resources automatically; inspect
+the reported experiment in your project. No managed-service run is claimed by
+the export or offline checks.
 
 ## Scope
 
@@ -138,7 +190,7 @@ The reverse adapter retains numeric metrics, handles explicit error/timeout and
 non-finite results, and removes temporary candidate files. It omits artifacts and
 does not reproduce OpenEvolve's evaluator pipeline, retries, LLM feedback,
 cascade stages, resource limits or search behavior. This is a limited export
-slice of OpenEvolve #468, not a complete cloud exporter or SDK shim.
+slice of OpenEvolve #468, not a complete SDK shim or search-behavior translation.
 """
 
 
@@ -207,7 +259,8 @@ def export_to_alphaevolve(
     the two named UTF-8 .py files and an optional explicit dependency file. Reject
     existing destinations (including symlinks); their parent must already exist.
     Validate inputs before creating output and clean up new output on write errors.
-    No dependencies, data, local modules, cloud runners or credentials are inferred.
+    No dependencies, data, local modules or credentials are inferred. The generated
+    launcher defaults to offline preflight; cloud use requires explicit --run.
     Read the generated README and explicitly run check.py after installing deps.
     """
     destination = Path(out_dir).absolute()
@@ -238,6 +291,7 @@ def export_to_alphaevolve(
             "src/__init__.py": b"",
             "src/evaluate.py": _EVALUATOR.encode("utf-8"),
             "check.py": _CHECK.encode("utf-8"),
+            "run_alphaevolve.py": _LAUNCH.encode("utf-8"),
             "README.md": _README.encode("utf-8"),
         }
     )

@@ -326,6 +326,61 @@ full SDK replacement, managed-service validation or completion of the issue.
 python -m unittest discover -s tests -p 'test_alphaevolve_entrypoint.py' -v
 ```
 
+### Pinned upstream-example CI
+
+The separate **AlphaEvolve upstream examples** workflow runs on relevant pull
+requests and can be dispatched manually after it is on the default branch. It
+uses a standard Ubuntu runner with Python 3.12, read-only repository permissions,
+no Secrets, no Google SDK and no paid provider. It has a 15-minute job limit,
+cancels superseded runs on the same PR/ref, and uploads no artifacts or caches.
+Checkout and dependency installation need Internet access; the example subprocesses
+then run with network/SDK-import tripwires and a small allowlist of environment
+variables, containing only deliberate dummy credential traps.
+
+[`tests/alphaevolve_upstream/revision.txt`](../../tests/alphaevolve_upstream/revision.txt)
+is the single upstream commit pin. Changing Google's `main` does not silently
+change these tests. The suite requires clean example trees at that revision,
+with the checkout inside OE's parent workspace (a sibling or nested directory).
+Paths are canonicalized and escapes from that workspace are rejected. The
+scientific dependencies are test-only and pinned separately; the Matplotlib pin
+retains the reviewed upstream plotting API. OE's base dependencies are unchanged.
+
+There are six original-entrypoint cases: circle packing, TSP and signal
+processing, each seed-only and with one fixed comment-only proposal. They use
+the existing public runner, unmodified upstream evaluators and real OE workers.
+The evolution cases check OE's actual trace for an evaluated child containing
+the proposal marker, instead of treating a provider call or successful process
+exit alone as proof. The cases also check expected finite seed metrics, exact
+original/staged source hashes, alias cleanup and report artifacts. TSP must
+produce all five PNG reports and its saved program; signal processing must
+retain its evaluator archive under the run directory.
+
+Python audit hooks record blocked socket/DNS attempts immediately, including in
+workers that exit without running `atexit`. Unscoped `alpha_evolve` and Google
+imports are blocked and recorded too; the explicit local aliases still work.
+Two negative tests check that even caught network/import exceptions remain
+observable and fail offline validation. These are tripwires for the trusted
+examples, not a security sandbox. Fixed proposals establish compatibility, not
+real-model optimization quality or a managed AlphaEvolve service run.
+
+To reproduce the eight opt-in checks locally from an OE checkout:
+
+```bash
+git clone https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud.git ../alphaevolve-reference
+git -C ../alphaevolve-reference checkout "$(cat tests/alphaevolve_upstream/revision.txt)"
+python -m pip install -e . -r tests/alphaevolve_upstream/requirements.txt
+ALPHAEVOLVE_UPSTREAM_DIR=../alphaevolve-reference \
+  python tests/alphaevolve_upstream/test_examples.py -v
+```
+
+Run this command in a Python 3.12 environment matching the workflow. No model
+server or Google credentials are needed. A missing path, wrong revision, dirty
+upstream checkout or offline violation makes explicit execution fail. Temporary
+run directories are cleaned up; failures include captured subprocess diagnostics.
+This suite is separate from default unit discovery and the existing
+`tests/integration` real-model job; neither implicitly downloads the upstream
+repository or requires these optional scientific packages.
+
 ## Evaluate an upstream seed locally
 
 From an installed OpenEvolve checkout:

@@ -11,6 +11,113 @@ configuration subset in the other direction. A minimal bundle exporter combines
 these reverse helpers with explicitly selected Python sources and a local seed
 check. These helpers do not replace the cloud SDK or implement all of #468.
 
+## Use a local experiment facade
+
+The first SDK-entrypoint slice is explicitly namespaced under
+`openevolve.compat.alpha_evolve`. It provides a small, synchronous lifecycle
+backed by OpenEvolve's public `run_evolution` API, without installing Google's
+SDK or reading Google credentials. It does **not** register a top-level
+`alpha_evolve` alias or change imports in other code.
+
+This self-contained example runs only a seed by default:
+
+```python
+import asyncio
+
+from openevolve.compat.alpha_evolve import (
+    AlphaEvolveClient,
+    AlphaEvolveExperiment,
+    run_controller_loop,
+)
+
+
+def evaluate(candidate):
+    namespace = {}
+    exec(candidate["content"]["files"][0]["content"], namespace)
+    return {"scores": {"scores": [{"metric": "quality", "score": namespace["x"]}]}}
+
+
+client = AlphaEvolveClient(
+    api_base="http://localhost:8000/v1",  # Explicit OE endpoint, not Google base_url.
+    api_key="local-placeholder",  # The provider client requires a non-empty key, even for a seed.
+    objective_metric="quality",
+    iterations=0,  # Seed only. Use 1 to opt in to one generation attempt.
+)
+experiment = AlphaEvolveExperiment(client, evaluate, max_programs_evaluated=2)
+experiment.create_experiment({
+    "program_language": "python",
+    "problem_description": "Maximize x while preserving the interface.",
+    "run_settings": {"max_programs": 2},
+    "generation_settings": {"models": [{"name": "my-local-model"}]},
+})
+experiment.create_initial_program({
+    "content": {"files": [{
+        "path": "program.py",
+        "content": "# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n",
+    }]},
+})
+experiment.start_experiment()  # Blocks until the local OE run completes.
+asyncio.run(run_controller_loop(experiment))  # Completion check; no second run.
+print(experiment.list_programs(params={"order_by": "quality desc"}))
+```
+
+Use model names actually served by the explicit endpoint. Set `api_key` on the
+local client if required; omitting it retains OE's usual provider behavior,
+including `OPENAI_API_KEY`. With `iterations=0`, seed evaluation executes but
+no generation is requested. With positive iterations (or `None`, which uses
+the imported budget), `start_experiment` invokes the configured provider and
+may incur charges. Creation alone does not execute the evaluator, create files
+or construct provider clients. Candidate/evaluator code is trusted, with no
+additional sandbox. Call `start_experiment` on the main thread outside an
+already-running asyncio loop; OpenEvolve installs signal handlers.
+
+The client accepts the six Google connection arguments (`project_id`,
+`location`, `collection`, `engine`, `assistant`, `base_url`) only to ease import
+migration. Supplied values produce one warning per construction and are ignored;
+they are never used as the local endpoint or printed in that warning. The
+existing configuration importer supplies model names/weights, problem text and
+generation budget. Unsupported fields, including cloud generation concurrency,
+still warn; they are not equated with OE evaluator concurrency. Only
+`parallel_evaluation=False` is supported by this initial facade.
+
+As with the explicit `.env` importer, `max_programs_evaluated` must equal
+`run_settings.max_programs` in this slice. **Neither is a strict evaluation cap:**
+the resulting OE limit counts generation attempts, with seed evaluation and
+retries additional. Distinct budgets are rejected. Explicit `iterations` may
+only reduce the generation budget, including zero. No evaluation counts are
+invented or presented as SDK statistics.
+
+The seed must be a mapping containing exactly one non-empty UTF-8 Python source
+file; pass SDK objects as `model_dump()` dictionaries. Its path is metadata,
+never a write target. Supplied seed scores are ignored with a warning: OE
+re-evaluates the exact source. The state progresses from `NEW` to `CREATED`,
+`READY`, then `RUNNING` and `COMPLETED` (or `FAILED`). A run cannot be restarted,
+including after interruption; construct a new instance instead. Configuration
+and candidate validation errors before execution can be corrected in place.
+The facade's own copied seed is cleaned up on success and failure. Optional
+`output_dir` preserves OE's normal run artifacts; without it, OE uses temporary
+output. The completed `EvolutionResult` is available as `experiment.result`.
+
+`list_programs` returns **only the best result**, using the SDK's
+`alphaEvolvePrograms` content/evaluation envelope. It is not an archive listing;
+there is no pagination. `order_by="<returned metric> asc|desc"` is accepted for
+entrypoint migration but has no effect on a one-item result. Unknown metrics or
+other query parameters raise errors. OE's internal `combined_score` is omitted
+unless it was explicitly selected as the objective; numeric objective/feature
+scores, including negatives, are retained. An error metric adds a generic
+failure insight. `run_controller_loop` only checks successful completion and
+accepts no cloud worker or timeout options.
+
+This is **not yet** enough to execute the original three upstream entrypoints
+unchanged: SDK model types, visualization helpers, import aliases, complete
+archive access and remote client/controller methods remain outside this slice.
+The earlier runner below remains available for unchanged upstream evaluators.
+No managed Google Cloud run is implied by a local facade run.
+
+```bash
+python -m unittest discover -s tests -p 'test_alphaevolve_local_experiment.py' -v
+```
+
 ## Evaluate an upstream seed locally
 
 From an installed OpenEvolve checkout:

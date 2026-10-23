@@ -205,6 +205,96 @@ This closes the local evaluator-type/import gap, not the complete SDK shim or
 the original-entrypoint acceptance criterion for #468. It neither enables cloud
 execution nor changes the facade's budget, concurrency or best-only query limits.
 
+## Run the original circle-packing or TSP entrypoint
+
+`run_entrypoint.py` executes the upstream `src/run_evolution.py`'s original
+`main()` for **circle_packing** and **tsp** with explicit local connection/model
+settings. It stages byte-identical copies of `src/` and optional
+`instructions.md`, imports their relative helpers under temporary local aliases,
+and swaps imported client/experiment factories and configuration globals. It
+does not rewrite the source, replace the evaluator, or contact Google's SDK.
+
+From an installed OE checkout, with a reviewed upstream checkout as above:
+
+```bash
+python -m pip install numpy scipy 'matplotlib>=3.9.1,<3.11' nest-asyncio python-dotenv
+
+# Run the original TSP main, including its seed scoring and report generation.
+# No generation requests. The output directory must be new and outside the example.
+MPLBACKEND=Agg python examples/alphaevolve_interop/run_entrypoint.py \
+  ../alphaevolve-reference/examples/tsp \
+  --api-base http://localhost:8000/v1 --model my-local-model \
+  --output-dir ./tsp-local-seed
+
+# Explicitly opt in to one model-driven generation attempt; may incur charges.
+MPLBACKEND=Agg python examples/alphaevolve_interop/run_entrypoint.py \
+  ../alphaevolve-reference/examples/circle_packing \
+  --api-base http://localhost:8000/v1 --model my-local-model \
+  --evolve --iterations 1 --output-dir ./circle-local-run
+```
+
+The endpoint/model are required even for the default seed-only run; their live
+availability is not checked until generation is requested. `--evolve` defaults
+to one generation attempt. Explicit positive `--iterations` requires `--evolve`.
+These are OE generation attempts, not hard evaluation/request/time/cost caps;
+seed evaluation, retries and the original reporting code's own evaluations are
+additional. An upstream entrypoint can score its seed before OE scores it again.
+This runner does not execute signal processing or remote/cloud-evaluation
+examples; signal processing still needs its cloud-specific query/controller
+calls adapted in a separate step.
+
+Only a named `--api-key-env VARIABLE_NAME` selects a key, which must be non-empty.
+Without it, an explicit local placeholder is used, including for provider-client
+construction in seed-only mode. The runner does **not** fall back to
+`OPENAI_API_KEY` or an example `.env` for credentials. Authenticated endpoints
+need an explicitly selected key before using `--evolve`. Google connection
+arguments in the upstream main are accepted by the existing facade and warn
+that they are ignored.
+
+The runner disables `dotenv.load_dotenv` during entrypoint import and temporarily
+supplies the selected model, equal positive source budgets, synchronous
+evaluation and concurrency-one configuration. Import-time environment changes
+are restored afterwards. It then sets the corresponding entrypoint globals
+explicitly, including zero local generation iterations for a seed-only run. This
+does not equate cloud generation concurrency with OE worker concurrency: the
+facade keeps its existing single-worker behavior and unsupported-field warnings.
+Missing expected configuration names cause a layout-drift error rather than a
+guessed adaptation.
+
+`.env*` files and bytecode caches are excluded from the staged `src/` copy;
+symlinks in the selected source tree or instructions are rejected. Original
+source files remain untouched, and reports operate on the staged copy. A new
+`--output-dir` retains copied sources, `oe-output/`, and upstream report artifacts,
+including partial output after failure. Existing directories/files/symlinks are
+never reused; the parent directory must already exist. Without `--output-dir`,
+the temporary run and reports are removed on success or failure.
+
+The final stdout is an OE metrics/best-score JSON summary; Python-level upstream
+prints are redirected to stderr. Upstream report/plot routines still execute;
+`MPLBACKEND=Agg` avoids interactive plot windows. Reports receive **only the
+facade's best result**, not the complete archive, so their history charts and
+reported program-list counts are not full-run evaluation statistics.
+The reviewed circle-packing plot helper uses `matplotlib.cm.get_cmap`, which
+[Matplotlib removed in 3.11](https://matplotlib.org/stable/api/prev_api_changes/api_changes_3.11.0.html#matplotlib-cm-get-cmap).
+The optional dependency range above retains that upstream plotting API; it is
+not a restriction on OE's base dependencies. This runner does not patch plotting
+libraries or rewrite upstream visualization code.
+
+Use a fresh, single-threaded main process outside an active asyncio loop.
+Temporary package and SDK aliases are removed before `main()` so evaluator
+callables serialize by value to workers. Already-loaded cloud SDK namespaces
+are refused. Trusted source code, including import-time code and plotting
+helpers, executes with normal process privileges; copying and alias cleanup
+provide no sandbox or general rollback of external side effects. Dynamic
+relative imports after initial loading are outside this reviewed subset.
+
+This walkthrough covers two original-entrypoint paths toward #468. It is not a
+full SDK replacement, managed-service validation or completion of the issue.
+
+```bash
+python -m unittest discover -s tests -p 'test_alphaevolve_entrypoint.py' -v
+```
+
 ## Evaluate an upstream seed locally
 
 From an installed OpenEvolve checkout:

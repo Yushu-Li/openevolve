@@ -16,9 +16,14 @@ EXAMPLES = {
 }
 
 
-def load_evaluator(example_dir):
+def load_evaluator(example_dir, *, local_model_types=False):
     """Load the example without importing its cloud client or experiment entrypoint."""
     function_name, objective = EXAMPLES[example_dir.name]
+    if local_model_types:
+        from openevolve.compat.alpha_evolve import load_evaluator as load_local_evaluator
+
+        evaluator = load_local_evaluator(example_dir / "src" / "evaluate.py", function_name)
+        return adapt_evaluator(evaluator, objective_metric=objective)
     spec = importlib.util.spec_from_file_location(
         "_alphaevolve_example", example_dir / "src" / "evaluate.py"
     )
@@ -34,6 +39,11 @@ def load_evaluator(example_dir):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("example_dir", type=Path, help="Path to the upstream example directory")
+    parser.add_argument(
+        "--local-model-types",
+        action="store_true",
+        help="Explicitly load evaluator imports with local envelopes instead of Google's SDK",
+    )
     sources = parser.add_mutually_exclusive_group()
     sources.add_argument(
         "--config", type=Path, help="OE YAML config; starts evolution (legacy mode)"
@@ -115,7 +125,7 @@ def main(argv=None):
     for path in (program_path, example_dir / "src" / "evaluate.py"):
         if not path.is_file():
             parser.error(f"Required example file not found: {path}")
-    evaluator = load_evaluator(example_dir)
+    evaluator = load_evaluator(example_dir, local_model_types=args.local_model_types)
     if not evolving:
         result = evaluator(program_path)
         print(json.dumps({"metrics": result.metrics, "artifacts": result.artifacts}, indent=2))

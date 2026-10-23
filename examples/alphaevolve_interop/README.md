@@ -16,8 +16,9 @@ check. These helpers do not replace the cloud SDK or implement all of #468.
 The first SDK-entrypoint slice is explicitly namespaced under
 `openevolve.compat.alpha_evolve`. It provides a small, synchronous lifecycle
 backed by OpenEvolve's public `run_evolution` API, without installing Google's
-SDK or reading Google credentials. It does **not** register a top-level
-`alpha_evolve` alias or change imports in other code.
+SDK or reading Google credentials. Importing the facade does **not** register a
+top-level `alpha_evolve` alias or change imports in other code. Scoped aliases
+require the explicit opt-in described below.
 
 This self-contained example runs only a seed by default:
 
@@ -109,14 +110,100 @@ failure insight. `run_controller_loop` only checks successful completion and
 accepts no cloud worker or timeout options.
 
 This is **not yet** enough to execute the original three upstream entrypoints
-unchanged: SDK model types, visualization helpers, import aliases, complete
-archive access and remote client/controller methods remain outside this slice.
-The earlier runner below remains available for unchanged upstream evaluators.
+unchanged: complete archive access, remote client/controller methods and the
+full SDK model surface remain unsupported. Local connection settings are still
+required, and cloud-specific configuration/controller calls need adaptation.
+The runner below remains available for unchanged upstream evaluators.
 No managed Google Cloud run is implied by a local facade run.
 
 ```bash
 python -m unittest discover -s tests -p 'test_alphaevolve_local_experiment.py' -v
 ```
+
+## Load evaluator imports without Google's SDK
+
+Five dependency-free evaluation envelopes now cover the local examples'
+`alpha_evolve.models` imports: `AlphaEvolveEvaluationScore`,
+`AlphaEvolveEvaluationScores`, `AlphaEvolveEvaluationInsight`,
+`AlphaEvolveEvaluationInsights` and `AlphaEvolveProgramEvaluation`. They live in
+`openevolve.compat.alpha_evolve.models`. These are dataclasses with attribute
+access and a no-argument `model_dump()` returning independent nested dictionaries,
+including optional `None` fields. They do **not** implement Pydantic validation,
+coercion, schemas, `model_validate` or serialization options. The existing
+evaluator adapter continues to validate metrics and map failures.
+
+Load an unchanged, trusted upstream evaluator with the local types explicitly:
+
+```python
+from pathlib import Path
+from openevolve.compat.alpha_evolve import load_evaluator
+from openevolve.compat.alphaevolve import adapt_evaluator
+
+example = Path("../alphaevolve-reference/examples/circle_packing")
+evaluate = load_evaluator(example / "src/evaluate.py", "circle_packing_evaluation")
+adapted = adapt_evaluator(evaluate, objective_metric="sum_of_radii")
+print(adapted(example / "src/program.py").metrics)
+# Or pass evaluate to the local AlphaEvolveExperiment from the previous section.
+```
+
+The helper reads and executes the selected `.py` file, including its import-time
+code, under temporary local aliases. It returns the raw candidate-based callable
+and removes both the aliases and temporary file-module registration. Registration
+during import supports decorators such as `@dataclass`; removal afterwards lets
+cloudpickle transport the evaluator by value to fresh OE workers, whose local
+envelope classes remain importable under the `openevolve` namespace. No SDK alias
+needs to remain active during evolution. The helper uses the current source
+bytes rather than timestamp/size-based cached bytecode.
+
+Evaluator dependencies such as NumPy, SciPy and Matplotlib must still be
+installed. Relative/sibling imports are not managed. Import-time side effects
+outside the temporary module entries are not undone, and candidate/evaluator
+code is trusted with the current process's privileges. This adds no sandbox.
+
+For explicit import migration, `local_imports` exposes temporary `client`,
+`experiment`, `controller`, `models` and `visualization` modules:
+
+```python
+from openevolve.compat.alpha_evolve import local_imports
+
+with local_imports():
+    from alpha_evolve.client import AlphaEvolveClient
+    from alpha_evolve.visualization import get_score
+# Existing references still work; sys.modules aliases have been removed.
+```
+
+This context is process-global, main-thread-only and intended for a
+single-threaded entrypoint, not a concurrent service. It refuses to enter if
+**any** `alpha_evolve` namespace is already loaded, even a nested local context;
+use a fresh process rather than shadowing a real SDK. An installed but unimported
+SDK is temporarily bypassed only inside the explicit context. Unknown SDK
+submodules do not fall back to the cloud package. Exit, including on exception
+or interruption, removes only module entries still owned by the context; it
+never overwrites replacements made by other code. It does not install packages,
+change import paths or credentials, or construct clients. The aliased local
+client still requires explicit OE endpoint/objective settings. For evaluator
+files, prefer `load_evaluator` so worker serialization does not depend on aliases.
+
+`openevolve.compat.alpha_evolve.visualization.get_score(program, metric)` reads
+mapping or attribute-based result envelopes without plotting or executing code.
+It preserves finite scores (including zero and negatives), returning `-inf` for
+absent, malformed, boolean or non-finite scores.
+
+The existing CLI also accepts `--local-model-types` as a scoped opt-in, including
+with seed-only evaluation or imported/OE evolution configs. Without that flag,
+its existing Google model imports remain unchanged:
+
+```bash
+# Requires the example's scientific dependencies, but no Google's SDK source path.
+MPLBACKEND=Agg python examples/alphaevolve_interop/run.py \
+  ../alphaevolve-reference/examples/circle_packing --local-model-types
+
+python -m unittest discover -s tests -p 'test_alphaevolve_local_imports.py' -v
+```
+
+This closes the local evaluator-type/import gap, not the complete SDK shim or
+the original-entrypoint acceptance criterion for #468. It neither enables cloud
+execution nor changes the facade's budget, concurrency or best-only query limits.
 
 ## Evaluate an upstream seed locally
 

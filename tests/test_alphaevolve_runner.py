@@ -231,6 +231,64 @@ class TestAlphaEvolveRunner(unittest.TestCase):
             self.assertIn("openevolve[alphaevolve-env]", self.assert_invalid(self.env_args))
             self.assertEqual(self.invoke(self.json_args)["metrics"]["sum_of_radii"], 1)
 
+    def test_local_model_types_flag_loads_legacy_imports_without_retaining_aliases(self):
+        (self.example / "src/evaluate.py").write_text(
+            "from alpha_evolve.models import (AlphaEvolveEvaluationScore, "
+            "AlphaEvolveEvaluationScores, AlphaEvolveProgramEvaluation)\n"
+            "def circle_packing_evaluation(candidate):\n"
+            "    return AlphaEvolveProgramEvaluation(scores=AlphaEvolveEvaluationScores(\n"
+            "        scores=[AlphaEvolveEvaluationScore(metric='sum_of_radii', score=3)]))\n"
+        )
+        before = {
+            name: value for name, value in sys.modules.items() if name.startswith("alpha_evolve")
+        }
+        result = self.invoke(["--local-model-types"])
+        self.assertEqual(result["metrics"]["sum_of_radii"], 3)
+        self.assertEqual(
+            {name: value for name, value in sys.modules.items() if name.startswith("alpha_evolve")},
+            before,
+        )
+
+    def test_local_model_loading_is_not_enabled_implicitly(self):
+        with patch(
+            "openevolve.compat.alpha_evolve.load_evaluator",
+            side_effect=AssertionError("must require explicit opt-in"),
+        ):
+            self.assertEqual(self.invoke([])["metrics"]["sum_of_radii"], 1)
+
+    def test_local_model_types_flag_runs_real_evolution_after_alias_cleanup(self):
+        source = self.example / "src/evaluate.py"
+        source.write_text(
+            "from alpha_evolve.models import AlphaEvolveProgramEvaluation\n" + source.read_text()
+        )
+
+        def offline_config(*args, **kwargs):
+            config = config_from_alphaevolve_env(*args, **kwargs)
+            config.database.num_islands = 1
+            for model in config.llm.models + config.llm.evaluator_models:
+                model.init_client = offline_model
+            return config
+
+        self.env.write_text("MODEL=offline-model\nMAX_PROGRAMS_GENERATED=1\n")
+        with (
+            patch(
+                "openevolve.compat.alphaevolve_env.config_from_alphaevolve_env",
+                side_effect=offline_config,
+            ),
+            patch("socket.socket.connect", side_effect=AssertionError("network")),
+        ):
+            result = self.invoke(
+                [
+                    *self.env_args,
+                    "--local-model-types",
+                    "--evolve",
+                    "--output-dir",
+                    str(self.root / "local-output"),
+                ]
+            )
+        self.assertEqual(result["metrics"]["sum_of_radii"], 2)
+        self.assertFalse(any(name.startswith("alpha_evolve") for name in sys.modules))
+
     def test_missing_seed_or_evaluator_is_reported_before_import(self):
         (self.example / "src/program.py").unlink()
         self.assertIn("Required example file", self.assert_invalid([]))

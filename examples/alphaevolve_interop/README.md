@@ -102,19 +102,29 @@ output. The completed `EvolutionResult` is available as `experiment.result`.
 `list_programs` returns **only the best result**, using the SDK's
 `alphaEvolvePrograms` content/evaluation envelope. It is not an archive listing;
 there is no pagination. `order_by="<returned metric> asc|desc"` is accepted for
-entrypoint migration but has no effect on a one-item result. Unknown metrics or
-other query parameters raise errors. OE's internal `combined_score` is omitted
+entrypoint migration but has no effect on a one-item result. The generic `score`
+ordering names the client's explicit objective, not an average of metrics.
+Unknown metrics or other query parameters raise errors. OE's internal `combined_score` is omitted
 unless it was explicitly selected as the objective; numeric objective/feature
 scores, including negatives, are retained. An error metric adds a generic
-failure insight. `run_controller_loop` only checks successful completion and
-accepts no cloud worker or timeout options.
+failure insight. `run_controller_loop` only checks successful completion.
+Explicit positive `num_samplers` and `num_evaluators` integers are accepted with
+a warning that they are ignored: the synchronous OE run has already finished,
+and no workers are created or concurrency changed. Other cloud controller
+options, including idle timeouts, remain unsupported.
 
-This is **not yet** enough to execute the original three upstream entrypoints
-unchanged: complete archive access, remote client/controller methods and the
-full SDK model surface remain unsupported. Local connection settings are still
-required, and cloud-specific configuration/controller calls need adaptation.
-The runner below remains available for unchanged upstream evaluators.
-No managed Google Cloud run is implied by a local facade run.
+`client.get_alpha_evolve_experiment(experiment_name=...)` is an in-memory lookup
+of experiments created by that client. It returns a fresh `{"name": ..., "state": ...}`
+dictionary, including for a created-but-not-started diagnostic experiment.
+State reflects the local lifecycle; it is not a cloud resource/status schema.
+Unknown names and names from another client raise `ValueError`. No configuration,
+credentials, program data or requests are involved; the client retains its local
+experiments for the client's lifetime.
+
+The scoped runner below now executes the three reviewed original entrypoints
+with explicit configuration/factory swaps. Complete archive access, other
+remote client/controller methods and the full SDK model surface remain
+unsupported. No managed Google Cloud run is implied by a local facade run.
 
 ```bash
 python -m unittest discover -s tests -p 'test_alphaevolve_local_experiment.py' -v
@@ -201,15 +211,15 @@ MPLBACKEND=Agg python examples/alphaevolve_interop/run.py \
 python -m unittest discover -s tests -p 'test_alphaevolve_local_imports.py' -v
 ```
 
-This closes the local evaluator-type/import gap, not the complete SDK shim or
-the original-entrypoint acceptance criterion for #468. It neither enables cloud
-execution nor changes the facade's budget, concurrency or best-only query limits.
+These types close the local evaluator-type/import gap, not the complete SDK shim
+by themselves. They neither enable cloud execution nor change the facade's
+budget, concurrency or best-only query limits.
 
-## Run the original circle-packing or TSP entrypoint
+## Run the original local-evaluation entrypoints
 
 `run_entrypoint.py` executes the upstream `src/run_evolution.py`'s original
-`main()` for **circle_packing** and **tsp** with explicit local connection/model
-settings. It stages byte-identical copies of `src/` and optional
+`main()` for **circle_packing**, **tsp** and **signal_processing** with explicit
+local connection/model settings. It stages byte-identical copies of `src/` and optional
 `instructions.md`, imports their relative helpers under temporary local aliases,
 and swaps imported client/experiment factories and configuration globals. It
 does not rewrite the source, replace the evaluator, or contact Google's SDK.
@@ -231,6 +241,12 @@ MPLBACKEND=Agg python examples/alphaevolve_interop/run_entrypoint.py \
   ../alphaevolve-reference/examples/circle_packing \
   --api-base http://localhost:8000/v1 --model my-local-model \
   --evolve --iterations 1 --output-dir ./circle-local-run
+
+# Run the original signal-processing main without model or Google Cloud requests.
+python examples/alphaevolve_interop/run_entrypoint.py \
+  ../alphaevolve-reference/examples/signal_processing \
+  --api-base http://localhost:8000/v1 --model my-local-model \
+  --output-dir ./signal-local-seed
 ```
 
 The endpoint/model are required even for the default seed-only run; their live
@@ -239,9 +255,8 @@ to one generation attempt. Explicit positive `--iterations` requires `--evolve`.
 These are OE generation attempts, not hard evaluation/request/time/cost caps;
 seed evaluation, retries and the original reporting code's own evaluations are
 additional. An upstream entrypoint can score its seed before OE scores it again.
-This runner does not execute signal processing or remote/cloud-evaluation
-examples; signal processing still needs its cloud-specific query/controller
-calls adapted in a separate step.
+Remote/cloud-evaluation examples such as adaptive sorting and LLM fine tuning
+remain unsupported.
 
 Only a named `--api-key-env VARIABLE_NAME` selects a key, which must be non-empty.
 Without it, an explicit local placeholder is used, including for provider-client
@@ -260,6 +275,22 @@ does not equate cloud generation concurrency with OE worker concurrency: the
 facade keeps its existing single-worker behavior and unsupported-field warnings.
 Missing expected configuration names cause a layout-drift error rather than a
 guessed adaptation.
+
+Signal processing's reviewed entrypoint has no model configuration. For that
+entrypoint only, a local experiment subclass supplies a single
+`generation_settings.models` entry from the required `--model`, overriding any
+upstream model list without mutating the original dictionary. The generic facade
+still requires explicit models; it does not guess a default. The original main
+first creates/queries a diagnostic experiment, then creates a separate experiment
+to run. The runner requires precisely this `CREATED`, `COMPLETED` sequence;
+an early return, caught diagnostic error or incomplete run is not success.
+
+While signal processing's main runs, `SAVE_PROGRAM_DIR` is set to the staged
+`programs/` directory and restored afterwards, including on failure. This keeps
+the evaluator's optional archive writes away from an inherited destination.
+The original saver can reuse filenames; these files are not a complete archive
+of evaluations. No other arbitrary environment or filesystem side effects are
+isolated.
 
 `.env*` files and bytecode caches are excluded from the staged `src/` copy;
 symlinks in the selected source tree or instructions are rejected. Original
@@ -288,7 +319,7 @@ helpers, executes with normal process privileges; copying and alias cleanup
 provide no sandbox or general rollback of external side effects. Dynamic
 relative imports after initial loading are outside this reviewed subset.
 
-This walkthrough covers two original-entrypoint paths toward #468. It is not a
+This walkthrough covers three original-entrypoint paths toward #468. It is not a
 full SDK replacement, managed-service validation or completion of the issue.
 
 ```bash

@@ -368,11 +368,79 @@ class TestLocalAlphaEvolveExperiment(unittest.TestCase):
         self.assertEqual(evaluation["scores"]["scores"], [{"metric": "quality", "score": -1e12}])
         self.assertIn("Error", evaluation["insights"]["insights"][0]["label"])
 
-    def test_controller_rejects_other_sdk_and_cloud_worker_arguments(self):
+    def test_controller_rejects_other_sdk_and_unimplemented_cloud_options(self):
         with self.assertRaises(TypeError):
             asyncio.run(run_controller_loop(object()))
         with self.assertRaises(TypeError):
-            run_controller_loop(self.complete(), num_evaluators=4)
+            run_controller_loop(self.complete(), idle_timeout_s=10)
+
+    def test_controller_accepts_counts_without_rerunning_or_adding_workers(self):
+        experiment = self.complete()
+        with (
+            self.assertWarnsRegex(UserWarning, "ignores num_samplers/num_evaluators"),
+            patch(EXPERIMENT_MODULE + ".run_evolution") as evolve,
+        ):
+            asyncio.run(run_controller_loop(experiment, num_samplers=2, num_evaluators=4))
+        evolve.assert_not_called()
+        self.assertEqual(experiment.state, "COMPLETED")
+        for key in ("num_samplers", "num_evaluators"):
+            for value in (0, -1, True, 1.5, "1"):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    asyncio.run(run_controller_loop(experiment, **{key: value}))
+        with self.assertRaises(RuntimeError):
+            asyncio.run(run_controller_loop(self.ready(), num_evaluators=1))
+
+    def test_generic_score_ordering_uses_selected_objective_and_preserves_metrics(self):
+        experiment = self.complete(result=self.fake_result(metrics={"quality": -3, "cost": -2}))
+        expected = experiment.list_programs({"order_by": "quality desc"})
+        for direction in ("asc", "desc"):
+            self.assertEqual(experiment.list_programs({"order_by": "score " + direction}), expected)
+        missing = self.complete(result=self.fake_result(metrics={"cost": -2}))
+        with self.assertRaises(ValueError):
+            missing.list_programs({"order_by": "score desc"})
+        with self.assertRaises(ValueError):
+            experiment.list_programs({"order_by": "score sideways"})
+
+    def test_local_query_tracks_lifecycle_without_io_and_returns_independent_metadata(self):
+        experiment = self.ready(api_key="private-selected-key")
+        client, name = experiment.client, experiment.experiment_name
+        with (
+            patch("socket.socket.connect", side_effect=AssertionError("network")),
+            patch("builtins.open", side_effect=AssertionError("filesystem")),
+        ):
+            self.assertEqual(
+                client.get_alpha_evolve_experiment(experiment_name=name),
+                {"name": name, "state": "READY"},
+            )
+            response = client.get_alpha_evolve_experiment(name)
+            response["state"] = "WRONG"
+            self.assertEqual(client.get_alpha_evolve_experiment(name)["state"], "READY")
+            self.complete(experiment)
+            self.assertEqual(client.get_alpha_evolve_experiment(name)["state"], "COMPLETED")
+            for invalid in (None, [], "unknown", self.ready().experiment_name):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    client.get_alpha_evolve_experiment(invalid)
+
+    def test_local_query_keeps_created_probes_separate_from_failed_runs(self):
+        probe = self.experiment()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            probe.create_experiment(self.payload)
+        client = probe.client
+        running = AlphaEvolveExperiment(client, evaluate_candidate, 2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            running.create_experiment(self.payload)
+        running.create_initial_program(self.candidate)
+        with patch(EXPERIMENT_MODULE + ".run_evolution", side_effect=RuntimeError("run failed")):
+            with self.assertRaisesRegex(RuntimeError, "run failed"):
+                running.start_experiment()
+        self.assertEqual(
+            client.get_alpha_evolve_experiment(probe.experiment_name)["state"], "CREATED"
+        )
+        self.assertEqual(
+            client.get_alpha_evolve_experiment(running.experiment_name)["state"], "FAILED"
+        )
 
     def test_documented_seed_example_works_with_real_provider_client_and_no_ambient_key(self):
         readme = Path(__file__).resolve().parents[1] / "examples/alphaevolve_interop/README.md"

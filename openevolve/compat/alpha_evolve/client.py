@@ -57,3 +57,16 @@ class AlphaEvolveClient:
         self.api_key = api_key
         self.iterations = iterations
         self.output_dir = str(output_dir) if output_dir is not None else None
+        self._experiments = {}
+
+    def get_alpha_evolve_experiment(self, experiment_name: str) -> dict:
+        """Return name/state for an experiment created by this local client.
+
+        This is an in-memory diagnostic lookup, not a cloud query or SDK
+        experiment resource. Configuration, credentials and program data are
+        intentionally not returned. The client retains its local experiments.
+        """
+        if not isinstance(experiment_name, str) or experiment_name not in self._experiments:
+            raise ValueError("experiment_name must identify an experiment created by this client")
+        experiment = self._experiments[experiment_name]
+        return {"name": experiment.experiment_name, "state": experiment.state}

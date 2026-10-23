@@ -6,6 +6,7 @@ import io
 import json
 import os
 import secrets
+import shutil
 import signal
 import sys
 import tempfile
@@ -46,7 +47,8 @@ class TestAlphaEvolveEntrypoint(unittest.TestCase):
             name: module for name, module in sys.modules.items() if name.startswith("alpha_evolve")
         }
         self.options = {"api_base": "http://localhost:8000/v1", "model": "offline-model"}
-        for name, metric in runner.EXAMPLES.items():
+        for name in ("circle_packing", "tsp"):
+            metric = runner.EXAMPLES[name]
             directory = self.root / name
             source = directory / "src"
             helpers = source / "utils"
@@ -148,8 +150,164 @@ class TestAlphaEvolveEntrypoint(unittest.TestCase):
             warnings.simplefilter("ignore", UserWarning)
             return runner.run_entrypoint(example, **(self.options | options))
 
+    def signal_example(self):
+        example = self.root / "signal_processing"
+        shutil.copytree(self.example, example)
+        source = example / "src"
+        evaluator = source / "evaluate.py"
+        evaluator.write_text(
+            "import os\n"
+            + evaluator.read_text()
+            .replace("'sum_of_radii'", "'overall_score'")
+            .replace("def evaluate(candidate):", "def signal_processing_evaluation(candidate):")
+            .replace(
+                "    return AlphaEvolveProgramEvaluation",
+                "    archive = Path(os.environ['SAVE_PROGRAM_DIR'])\n"
+                "    archive.mkdir(exist_ok=True)\n"
+                "    (archive / 'candidate.py').write_text(candidate['content']['files'][0]['content'])\n"
+                "    return AlphaEvolveProgramEvaluation",
+            )
+        )
+        (source / "run_evolution.py").write_text(
+            "import asyncio\n"
+            "import json\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "from dotenv import load_dotenv\n"
+            "from alpha_evolve.client import AlphaEvolveClient\n"
+            "from alpha_evolve.experiment import AlphaEvolveExperiment\n"
+            "from alpha_evolve.controller import run_controller_loop\n"
+            "from .evaluate import signal_processing_evaluation, INITIAL_PROGRAM_CODE\n"
+            "load_dotenv()\n"
+            "MAX_PROGRAMS_GENERATED = MAX_PROGRAMS_EVALUATED = 10\n"
+            "CONCURRENCY = 2\n"
+            "def main():\n"
+            "    client = AlphaEvolveClient(project_id='ignored-project')\n"
+            "    config = {\n"
+            "        'program_language': 'python', 'problem_description': 'Maximize x',\n"
+            "        'run_settings': {'max_programs': MAX_PROGRAMS_GENERATED, 'concurrency': CONCURRENCY},\n"
+            "    }\n"
+            "    try:\n"
+            "        probe = AlphaEvolveExperiment(client, signal_processing_evaluation, MAX_PROGRAMS_EVALUATED)\n"
+            "        probe.create_experiment(config)\n"
+            "        metadata = client.get_alpha_evolve_experiment(experiment_name=probe.experiment_name)\n"
+            "    except Exception:\n"
+            "        return\n"
+            "    experiment = AlphaEvolveExperiment(client, signal_processing_evaluation, MAX_PROGRAMS_EVALUATED)\n"
+            "    experiment.create_experiment(config)\n"
+            "    assert 'generation_settings' not in config\n"
+            "    experiment.create_initial_program({'content': {'files': [{'path': 'program.py', 'content': INITIAL_PROGRAM_CODE}]}})\n"
+            "    experiment.start_experiment()\n"
+            "    asyncio.run(run_controller_loop(experiment, num_samplers=CONCURRENCY, num_evaluators=CONCURRENCY))\n"
+            "    result = experiment.list_programs({'order_by': 'score desc'})\n"
+            "    output = Path(__file__).resolve().parents[1]\n"
+            "    report = {'probe': metadata, 'result': result, 'budget': MAX_PROGRAMS_GENERATED,\n"
+            "              'concurrency': CONCURRENCY, 'save_dir': os.environ['SAVE_PROGRAM_DIR']}\n"
+            "    (output / 'report.json').write_text(json.dumps(report))\n"
+        )
+        return example
+
+    def test_signal_original_lifecycle_runs_seed_and_real_worker_with_selected_model(self):
+        example = self.signal_example()
+        original = {p.relative_to(example): p.read_bytes() for p in example.rglob("*.py")}
+        for iterations in (0, 1):
+            output = self.root / f"signal-output-{iterations}"
+            with self.subTest(iterations=iterations):
+                result = self.run_offline(example, iterations=iterations, output_dir=output)
+                self.assertEqual(result["metrics"]["overall_score"], 1 + iterations)
+                report = json.loads((output / "report.json").read_text())
+                self.assertEqual(report["probe"]["state"], "CREATED")
+                self.assertEqual(report["budget"], max(1, iterations))
+                self.assertEqual(report["concurrency"], 1)
+                self.assertEqual(report["save_dir"], str(output / "programs"))
+                self.assertTrue((output / "programs/candidate.py").is_file())
+                self.assertTrue((output / "oe-output/best/best_program.py").is_file())
+                self.assertNotEqual(
+                    report["probe"]["name"],
+                    report["result"]["alphaEvolvePrograms"][0]["name"].rsplit("/programs/", 1)[0],
+                )
+                for path, content in original.items():
+                    self.assertEqual((example / path).read_bytes(), content)
+                    self.assertEqual((output / path).read_bytes(), content)
+
+    def test_signal_explicit_model_overrides_supplied_models_without_mutating_config(self):
+        example = self.signal_example()
+        source = example / "src/run_evolution.py"
+        source.write_text(
+            source.read_text()
+            .replace(
+                "'program_language':",
+                "'generation_settings': {'models': [{'name': 'upstream-model'}]}, 'program_language':",
+            )
+            .replace(
+                "assert 'generation_settings' not in config",
+                "assert config['generation_settings']['models'] == [{'name': 'upstream-model'}]",
+            )
+        )
+        configurations = []
+        configure = self.offline_config
+
+        def record(*args, **kwargs):
+            local = configure(*args, **kwargs)
+            configurations.append([(m.name, m.weight) for m in local.llm.models])
+            return local
+
+        with patch.object(self, "offline_config", side_effect=record):
+            self.run_offline(example, iterations=1)
+        self.assertEqual(configurations, [[("offline-model", 1.0)]] * 2)
+
+    def test_signal_probe_query_failure_or_early_return_is_not_success(self):
+        example = self.signal_example()
+        with patch.object(
+            runner.AlphaEvolveClient,
+            "get_alpha_evolve_experiment",
+            side_effect=ValueError("lookup failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "without completing"):
+                self.run_offline(example)
+        source = example / "src/run_evolution.py"
+        source.write_text(
+            source.read_text().replace("    experiment.start_experiment()", "    return")
+        )
+        with self.assertRaisesRegex(RuntimeError, "without completing"):
+            self.run_offline(example)
+
+    def test_signal_archive_environment_is_restored_on_success_and_failure(self):
+        example = self.signal_example()
+        inherited = self.root / "must-not-create-archives"
+        with patch.dict(os.environ, {"SAVE_PROGRAM_DIR": str(inherited)}):
+            self.run_offline(example)
+            self.assertEqual(os.environ["SAVE_PROGRAM_DIR"], str(inherited))
+            source = example / "src/run_evolution.py"
+            source.write_text(
+                source.read_text().replace(
+                    "    experiment.start_experiment()",
+                    "    raise RuntimeError('entrypoint failed')",
+                )
+            )
+            with self.assertRaisesRegex(RuntimeError, "entrypoint failed"):
+                self.run_offline(example)
+            self.assertEqual(os.environ["SAVE_PROGRAM_DIR"], str(inherited))
+        self.assertFalse(inherited.exists())
+
+    def test_signal_layout_drift_and_malformed_generation_settings_are_rejected(self):
+        example = self.signal_example()
+        source = example / "src/run_evolution.py"
+        original = source.read_text()
+        source.write_text(original.replace("CONCURRENCY = 2", "REMOVED_CONCURRENCY = 2"))
+        with self.assertRaisesRegex(ValueError, "layout changed"):
+            self.run_offline(example)
+        source.write_text(
+            original.replace(
+                "'program_language':", "'generation_settings': None, 'program_language':"
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "without completing"):
+            self.run_offline(example)
+
     def test_original_main_relative_helpers_and_real_workers_run_with_config_swaps(self):
-        for name, metric in runner.EXAMPLES.items():
+        for name in ("circle_packing", "tsp"):
+            metric = runner.EXAMPLES[name]
             example = self.root / name
             originals = {
                 path.relative_to(example): path.read_bytes()
@@ -246,7 +404,7 @@ class TestAlphaEvolveEntrypoint(unittest.TestCase):
             self.assertFalse(output.exists())
 
     def test_unsupported_layout_missing_sources_and_symlinks_are_rejected(self):
-        unsupported = self.root / "signal_processing"
+        unsupported = self.root / "adaptive_sort"
         unsupported.mkdir()
         with self.assertRaisesRegex(ValueError, "Supported upstream"):
             runner.run_entrypoint(unsupported, **self.options)

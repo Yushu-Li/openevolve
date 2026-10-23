@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
@@ -19,7 +20,11 @@ from openevolve.compat.alpha_evolve import (
     local_imports,
 )
 
-EXAMPLES = {"circle_packing": "sum_of_radii", "tsp": "neg_tour_length"}
+EXAMPLES = {
+    "circle_packing": "sum_of_radii",
+    "tsp": "neg_tour_length",
+    "signal_processing": "overall_score",
+}
 
 
 def _load_entrypoint(root, settings):
@@ -53,7 +58,7 @@ def _load_entrypoint(root, settings):
 def _validate_source(example_dir):
     example_dir = Path(example_dir).resolve()
     if example_dir.name not in EXAMPLES:
-        raise ValueError("Supported upstream entrypoints: circle_packing, tsp")
+        raise ValueError("Supported upstream entrypoints: " + ", ".join(EXAMPLES))
     source = example_dir / "src"
     required = [source / name for name in ("run_evolution.py", "program.py", "evaluate.py")]
     if example_dir.name == "tsp":
@@ -72,7 +77,7 @@ def _validate_source(example_dir):
 def run_entrypoint(example_dir, *, api_base, model, api_key=None, iterations=0, output_dir=None):
     """Run trusted, byte-identical staged sources; default to seed evaluation only.
 
-    Only the two reviewed entrypoints are supported. Imports are process-global;
+    Only the three reviewed entrypoints are supported. Imports are process-global;
     use this example runner in a fresh, single-threaded main process. Generation
     uses the chosen endpoint and may incur charges when iterations is positive.
     Reports operate on the facade's best-only result, not a full search history.
@@ -96,8 +101,26 @@ def run_entrypoint(example_dir, *, api_base, model, api_key=None, iterations=0, 
 
     experiments = []
 
+    class SignalProcessingExperiment(AlphaEvolveExperiment):
+        def create_experiment(self, config):
+            # This upstream entrypoint has no generation_settings.models. Supply
+            # the caller's explicit model as a configuration swap, never a default
+            # model or an in-place change to the original experiment dictionary.
+            if not isinstance(config, Mapping):
+                raise ValueError("experiment must be a mapping")
+            generation = config.get("generation_settings", {})
+            if not isinstance(generation, Mapping):
+                raise ValueError("generation_settings must be a mapping")
+            selected = dict(generation) | {"models": [{"name": model, "weight": 1.0}]}
+            super().create_experiment(dict(config) | {"generation_settings": selected})
+
     def experiment_factory(*args, **kwargs):
-        experiment = AlphaEvolveExperiment(*args, **kwargs)
+        experiment_type = (
+            SignalProcessingExperiment
+            if example_dir.name == "signal_processing"
+            else AlphaEvolveExperiment
+        )
+        experiment = experiment_type(*args, **kwargs)
         experiments.append(experiment)
         return experiment
 
@@ -138,15 +161,23 @@ def run_entrypoint(example_dir, *, api_base, model, api_key=None, iterations=0, 
             "AlphaEvolveExperiment",
             "MAX_PROGRAMS_GENERATED",
             "MAX_PROGRAMS_EVALUATED",
-            "PARALLEL_EVALUATION",
             "CONCURRENCY",
         }
         if example_dir.name == "circle_packing":
             required.update(
-                {"MODEL_1", "MODEL_2", "MODEL_1_WEIGHT", "MODEL_2_WEIGHT", "WORKER_CONCURRENCY"}
+                {
+                    "MODEL_1",
+                    "MODEL_2",
+                    "MODEL_1_WEIGHT",
+                    "MODEL_2_WEIGHT",
+                    "WORKER_CONCURRENCY",
+                    "PARALLEL_EVALUATION",
+                }
             )
+        elif example_dir.name == "tsp":
+            required.update({"MODEL", "PARALLEL_EVALUATION"})
         else:
-            required.add("MODEL")
+            required.add("run_controller_loop")
         if any(not hasattr(entrypoint, key) for key in required) or not callable(entrypoint.main):
             raise ValueError("Upstream entrypoint layout changed; review its configuration first")
 
@@ -168,11 +199,28 @@ def run_entrypoint(example_dir, *, api_base, model, api_key=None, iterations=0, 
             entrypoint.MODEL_1, entrypoint.MODEL_2 = model, ""
             entrypoint.MODEL_1_WEIGHT, entrypoint.MODEL_2_WEIGHT = 1.0, 0.0
             entrypoint.WORKER_CONCURRENCY = 1
-        else:
+        elif example_dir.name == "tsp":
             entrypoint.MODEL = model
 
-        entrypoint.main()
-        if not experiments or any(experiment.state != "COMPLETED" for experiment in experiments):
+        # The signal evaluator optionally writes archives to an environment path.
+        # Keep those artifacts in this run, rather than an inherited destination.
+        environment = (
+            {"SAVE_PROGRAM_DIR": str(root / "programs")}
+            if example_dir.name == "signal_processing"
+            else {}
+        )
+        with patch.dict(os.environ, environment):
+            entrypoint.main()
+        states = [experiment.state for experiment in experiments]
+        # The reviewed signal main first creates/queries a diagnostic experiment,
+        # then creates a separate one to run. Do not accept an early caught error
+        # or silently discard any other incomplete/failed experiment.
+        complete = (
+            states == ["CREATED", "COMPLETED"]
+            if example_dir.name == "signal_processing"
+            else bool(states) and all(state == "COMPLETED" for state in states)
+        )
+        if not complete:
             raise RuntimeError("Upstream entrypoint returned without completing a local experiment")
         result = experiments[-1].result
         return {

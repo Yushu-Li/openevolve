@@ -93,6 +93,7 @@ class AlphaEvolveExperiment:
         self._config = local
         self.experiment_name = "local/experiments/" + uuid.uuid4().hex
         self.state = "CREATED"
+        self.client._experiments[self.experiment_name] = self
 
     def create_initial_program(self, initial_program: Mapping) -> None:
         """Accept one UTF-8 Python source; supplied seed scores are not trusted."""
@@ -179,12 +180,16 @@ class AlphaEvolveExperiment:
         if "order_by" in params:
             order = params["order_by"]
             parts = order.rsplit(" ", 1) if isinstance(order, str) else []
+            # Some upstream entrypoints use a generic score ordering. It names
+            # the explicitly selected objective, not an average of all metrics.
+            if len(parts) == 2 and parts[0] == "score":
+                parts[0] = self.client.objective_metric
             if (
                 len(parts) != 2
                 or parts[1] not in ("asc", "desc")
                 or parts[0] not in {score["metric"] for score in scores}
             ):
-                raise ValueError("order_by must name a returned metric and asc or desc")
+                raise ValueError("order_by must name a returned metric (or score) and asc or desc")
         evaluation = {"scores": {"scores": scores}}
         if "error" in metrics:
             evaluation["insights"] = {

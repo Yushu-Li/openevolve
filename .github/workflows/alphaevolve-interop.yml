@@ -7,6 +7,8 @@ on:
       - '.github/workflows/alphaevolve-interop.yml'
       - 'openevolve/**'
       - 'examples/alphaevolve_interop/**'
+      - 'examples/function_minimization/**'
+      - 'examples/circle_packing/**'
       - 'tests/alphaevolve_upstream/**'
       - 'pyproject.toml'
   workflow_dispatch:
@@ -63,3 +65,6 @@ jobs:
         env:
           ALPHAEVOLVE_UPSTREAM_DIR: ${{ github.workspace }}/.alphaevolve-upstream
         run: python tests/alphaevolve_upstream/test_examples.py -v
+
+      - name: Round-trip two OpenEvolve examples through relocated export bundles
+        run: python tests/alphaevolve_upstream/test_roundtrip.py -v

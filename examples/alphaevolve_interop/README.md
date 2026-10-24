@@ -709,6 +709,58 @@ python -m unittest discover -s tests -p 'test_alphaevolve_bundle.py' -v
 python -m unittest discover -s tests -p 'test_alphaevolve_launch.py' -v
 ```
 
+### Verify a complete local round trip
+
+The dedicated interop workflow also exercises two existing OpenEvolve examples
+through this complete path, without Google's SDK or a model service:
+
+```text
+OE Python seed + evaluator + YAML
+  -> export_to_alphaevolve
+  -> relocate bundle and remove the original input directory
+  -> config_from_alphaevolve(experiment.json)
+  -> generated candidate evaluator -> adapt_evaluator
+  -> real OpenEvolve seed evaluation + one evaluated proposal
+```
+
+From an installed source checkout, reproduce just these checks with:
+
+```bash
+python tests/alphaevolve_upstream/test_roundtrip.py -v
+```
+
+Unlike the original-entrypoint tests, this command needs no AlphaEvolve source
+checkout. It uses the unchanged `function_minimization` and `circle_packing`
+sources from this repository. The helper runs from an unrelated temporary
+working directory, checks source hashes and configuration mappings, and removes
+temporary import registrations before transporting evaluators to OE workers.
+Both the seed and a fixed comment-only proposal are evaluated on each side.
+The tests compare all numeric seed/child metrics except elapsed evaluation time,
+check positive finite fitness, and require worker evaluation records and actual
+evolution traces. A provider call or successful process exit alone is insufficient.
+The existing test-only startup tripwires block and record network and cloud SDK
+attempts in the helper, workers and evaluator subprocesses. These are safeguards
+for trusted examples, not a security sandbox.
+
+This is execution equivalence of the **supported subset under controlled inputs**,
+not a lossless search/configuration round trip. The test bounds the budget to one,
+fixes NumPy's random stream per evaluation, and explicitly aligns one island,
+single-stage single-worker evaluation and diff mode. The circle example needs
+an explicit model-name mapping; model weights and the mapped names are checked
+before replacing generation with the fixed offline provider. The imported prompt
+has the documented `Problem description:` prefix. Export warnings for omitted
+settings are checked; original artifacts and timing are not expected to survive.
+There is no claim of real-model improvement or of preservation of the examples'
+original multi-island/cascade behavior.
+
+For #468, the three original local entrypoints and this OE-to-bundle-to-OE path
+now have automated offline coverage. **An authenticated managed AlphaEvolve run
+remains a separate acceptance check.** Neither these tests nor GitHub Actions
+exercise Google's service, verify project access/live model availability, or
+establish cloud cost limits. A maintainer with service access can review a bundle,
+run its local `check.py` and preflight, then explicitly test `--run` as documented
+above before deciding whether to close #468 or track remaining scope separately.
+
 ## Import a local Python experiment configuration
 
 `config_from_alphaevolve` imports an explicit experiment dictionary without
